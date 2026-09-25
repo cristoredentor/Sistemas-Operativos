@@ -11,14 +11,6 @@ Todo lo que va después de /i pertenece al mismo bloque ocupado hasta llegar a /
 Un hueco es una racha de celdas vacías; dos huecos nunca quedan contiguos
 (se fusionan), porque en el arreglo serían indistinguibles.
 
-Encima del arreglo vive una lista doblemente ligada con un nodo por bloque:
-    position : primera celda de datos (después de /i en un ocupado; la primera celda en un hueco)
-    weight   : celdas que ocupa el bloque en el arreglo (en un ocupado incluye /i y /f)
-    is_hole  : True si el bloque es un hueco
-La lista permite saltar de bloque en bloque sin recorrer celda por celda,
-sin importar qué tan grande sea cada bloque. La simulación compara cuántos
-nodos visita cada política contra cuántas celdas recorrería un escaneo del arreglo.
-
 Políticas implementadas: First Fit, Next Fit, Best Fit, Worst Fit y Quick Fit.
 """
 
@@ -38,13 +30,13 @@ MARKER_CELLS = 2             # cada bloque ocupado gasta 2 celdas en /i y /f
 
 MIN_REQUEST = 4              # tamaño mínimo de un dato (celdas)
 MAX_REQUEST = 16             # tamaño máximo de un dato (celdas)
-MAX_ACTIVE = 18              # procesos vivos como máximo en el flujo de peticiones
-ALLOC_PROBABILITY = 0.6      # probabilidad de pedir memoria (si no, se libera)
+MAX_ACTIVE = 18              # procesos vivos como máximo en el flujo de peticiones (Tiempo de vida: con el máximo alcanzado solo se libera)
+ALLOC_PROBABILITY = 0.6      # probabilidad de pedir memoria (si no, se libera) (Tiempo de vida: controla qué tan seguido muere un proceso)
 TOTAL_REQUESTS = 10000
 SEED = 2026
 
 INITIAL_FILL = 0.7           # fracción de memoria ocupada al generar bloques aleatorios
-INITIAL_FREE_PROBABILITY = 0.4
+INITIAL_FREE_PROBABILITY = 0.4   # (Tiempo de vida) probabilidad de que un proceso inicial muera antes de empezar
 CONSISTENCY_CHECK_EVERY = 100
 
 ROW_WIDTH = 64               # celdas por renglón al dibujar la memoria
@@ -56,7 +48,11 @@ SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 # Lista doblemente ligada
 # ---------------------------------------------------------------------------
 class Node:
-    """Un bloque de memoria: hueco u ocupado por un proceso."""
+    """
+    Un bloque de memoria: hueco u ocupado por un proceso.
+    Sigue el formato de las presentaciones, cada nodo tiene su 
+    tamaño y la posición en la que empieza.
+    """
 
     def __init__(self, start, weight, is_hole, pid=None):
         self.start = start         # primera celda del bloque en el arreglo (/i si está ocupado)
@@ -69,7 +65,14 @@ class Node:
     @property
     def position(self):
         """Primera celda de datos: después de /i en un ocupado, la misma 'start' en un hueco."""
-        return self.start if self.is_hole else self.start + 1
+        res = None  # (Modificado por mí) 
+        if self.is_hole: 
+            res = self.start
+        else:
+            res = self.start + 1 
+
+        return res
+
 
     @property
     def end(self):
@@ -82,64 +85,51 @@ class Node:
 
 
 def fits(node, need):
-    """¿Un bloque ocupado de 'need' celdas (datos + /i + /f) cabe en este nodo?"""
+    """Este método verifica si el dato que queremos meter cabe en la memoria"""
     return node.is_hole and node.weight >= need
 
 
 # ---------------------------------------------------------------------------
 # Políticas de asignación
 # ---------------------------------------------------------------------------
-class AllocationStrategy:
-    """
-    Base de las políticas. find_hole devuelve (nodo elegido o None, nodos visitados).
-    Los ganchos on_* permiten que una política mantenga estructuras propias
-    (por ejemplo, las listas por tamaño de Quick Fit) sincronizadas con la memoria.
-    """
-    name = "base"
 
-    def __init__(self):
-        self.maintenance_visits = 0   # nodos visitados solo para mantener estructuras auxiliares
+# Se quitó la clase base AllocationStrategy. La memoria llama directamente
+# a los métodos de la política (reset, on_hole_added, etc.) suponiendo que existen.
 
-    def reset(self, memory):
-        pass
-
-    def find_hole(self, memory, need):
-        raise NotImplementedError
-
-    def after_allocate(self, memory, node):
-        pass
-
-    def on_hole_added(self, memory, node):
-        pass
-
-    def on_hole_removed(self, memory, node):
-        pass
-
-    def on_node_merged(self, memory, removed, survivor):
-        pass
+# ================================================================================
+#                              "Políticas vistas en clase"
+# ================================================================================
 
 
-class FirstFit(AllocationStrategy):
+class FirstFit:  
     """Toma el primer hueco en el que cabe el dato."""
     name = "First Fit"
+    tracks_cursor = False  # (modificado por Claude) usa after_allocate y on_node_merged
+    keeps_hole_index = False  # (modificado por Claude) usa on_hole_added y on_hole_removed
+
+    def __init__(self):  # (modificado por Claude)
+        self.maintenance_visits = 0  # (modificado por Claude)
 
     def find_hole(self, memory, need):
         visited = 0
         curr = memory.head
-        while curr is not None and not fits(curr, need):
+        while curr is not None and not fits(curr, need):  #Al usar fits estás verificando si es hole
             visited += 1
             curr = curr.next
-        if curr is not None:
-            visited += 1   # el nodo elegido también se visitó
+
         return curr, visited
 
-
-class NextFit(AllocationStrategy):
+class NextFit: 
     """Como First Fit, pero empieza a buscar donde se quedó la última asignación."""
     name = "Next Fit"
+    tracks_cursor = True  # (modificado por Claude) usa after_allocate y on_node_merged
+    keeps_hole_index = False  # (modificado por Claude) usa on_hole_added y on_hole_removed
+
+    def __init__(self):  # (modificado por Claude)
+        self.maintenance_visits = 0  # (modificado por Claude)
 
     def reset(self, memory):
-        self.pointer = memory.head
+        self.pointer = memory.head   # Pointer: nodo donde empieza la siguiente búsqueda
 
     def find_hole(self, memory, need):
         curr = self.pointer
@@ -158,50 +148,79 @@ class NextFit(AllocationStrategy):
             self.pointer = survivor
 
 
-class BestFit(AllocationStrategy):
+class BestFit:  # (modificado por Claude)
+
     """Toma el hueco más pequeño en el que cabe el dato (se detiene si encuentra uno exacto)."""
     name = "Best Fit"
+    tracks_cursor = False  # (modificado por Claude) usa after_allocate y on_node_merged
+    keeps_hole_index = False  # (modificado por Claude) usa on_hole_added y on_hole_removed
+
+    def __init__(self):  # (modificado por Claude)
+        self.maintenance_visits = 0  # (modificado por Claude)
 
     def find_hole(self, memory, need):
+        bandera = False  #(Modificado por mí) Añadimos una bandera para que acabe en vez de la condición rara que usaba Claude
         best = None
         visited = 0
         curr = memory.head
-        while curr is not None and not (best is not None and best.weight == need):
+
+        while curr is not None and not bandera: 
             visited += 1
-            if fits(curr, need) and (best is None or curr.weight < best.weight):
+            if fits(curr, need):
                 best = curr
+                if(best.weight == need):  # Si son iguales la bandera es true y se acaba el while en la sig iteración
+                    bandera = True 
             curr = curr.next
+
         return best, visited
 
 
-class WorstFit(AllocationStrategy):
+class WorstFit:  # (modificado por Claude)
     """Toma el hueco más grande."""
     name = "Worst Fit"
+    tracks_cursor = False  # (modificado por Claude) usa after_allocate y on_node_merged
+    keeps_hole_index = False  # (modificado por Claude) usa on_hole_added y on_hole_removed
+
+    def __init__(self):  # (modificado por Claude)
+        self.maintenance_visits = 0  # (modificado por Claude)
 
     def find_hole(self, memory, need):
         largest = None
         visited = 0
         curr = memory.head
-        while curr is not None:
+        while curr is not None: #Visita todos los nodos
             visited += 1
-            if curr.is_hole and (largest is None or curr.weight > largest.weight):
-                largest = curr
+            if curr.is_hole and (largest is None or curr.weight > largest.weight): #Si es el primero o el de mayor tamaño 
+                largest = curr                   #actualizamos el valor del más grande
             curr = curr.next
-        return (largest if largest is not None and fits(largest, need) else None), visited
+        return (largest if largest is not None and fits(largest, need) else None), visited #Regresa el nodo mas grande y los visitados
 
 
-class QuickFit(AllocationStrategy):
-    """
-    Mantiene listas de huecos por clase de tamaño: la clase k guarda los huecos
-    con 2^k <= weight < 2^(k+1). Buscar es rápido, pero cada vez que un hueco
-    cambia (asignar, liberar, fusionar) hay que sacarlo o meterlo de su lista:
-    ese costo se reporta como 'mantenimiento'.
-    """
+
+
+"""
+(OBSERVACIÓN): 
+Me dí cuenta de que Claude había hecho una clase de Quick Fit que 
+no concuerda con la definición que vimos en clase:
+
+ Keep lists of holes of different sizes Poor coalescing performance.
+"""
+
+#Método hecho por mí en vista de que no QuickFit no era estrictamente  lo que vimos
+
+"""
+Método QuickFit que tiene un diccionario buckets con los huecos y dentro otro 
+diccionario con la posición del hueco referenciando al nodo, 
+"""
+class QuickFit: #(Modificado por mí)
+
     name = "Quick Fit"
+    tracks_cursor = False  
+    keeps_hole_index = True 
 
-    @staticmethod
-    def size_class(weight):
-        return weight.bit_length() - 1
+    def __init__(self):  
+        self.maintenance_visits = 0  
+        self.buckets = {}     # Tiene más sentido añadir el diccionario con los hoyos al declarar la clase
 
     def reset(self, memory):
         self.buckets = {}
@@ -210,45 +229,47 @@ class QuickFit(AllocationStrategy):
                 self.on_hole_added(memory, node)
 
     def find_hole(self, memory, need):
-        k = self.size_class(need)
-        # en la clase de 'need' puede haber huecos más chicos: first fit dentro de la clase
-        candidates = self.buckets.get(k, [])
-        idx = 0
+        found = None
         visited = 0
-        while idx < len(candidates) and not fits(candidates[idx], need):
-            visited += 1
-            idx += 1
-        found = candidates[idx] if idx < len(candidates) else None
-        if found is not None:
-            visited += 1
-        # cualquier hueco de una clase mayor cabe: basta el primero de la primera lista no vacía
-        k += 1
-        max_class = self.size_class(memory.size)
-        while found is None and k <= max_class:
-            if self.buckets.get(k):
-                found = self.buckets[k][0]
+        size = need
+        while found is None and size <= memory.size:  # Primero el tamaño exacto, luego los mayores
+            if size in self.buckets:
+                found = next(iter(self.buckets[size].values()))  # Al asignar found acaba el while
                 visited += 1
-            k += 1
+            size += 1
         return found, visited
 
     def on_hole_added(self, memory, node):
-        self.buckets.setdefault(self.size_class(node.weight), []).append(node)
+        if node.weight not in self.buckets:  # Si no hay huecos de ese tamaño se crea la entrada
+            self.buckets[node.weight] = {}   # creamos un diccionario dentro del diccionario con el formato {tamaño: {posición: nodo}}
+        self.buckets[node.weight][node.position] = node
 
     def on_hole_removed(self, memory, node):
-        bucket = self.buckets[self.size_class(node.weight)]
-        idx = bucket.index(node)
-        self.maintenance_visits += idx + 1
-        bucket.pop(idx)
+        self.maintenance_visits += 1  # Se saca directo por su posición, sin recorrer
+        del self.buckets[node.weight][node.position]
+        if not self.buckets[node.weight]:  # Si ya no hay huecos de ese tamaño se borra la entrada
+            del self.buckets[node.weight]
 
 
+"""
+(modificado por Claude) Antes se usaba call_if_exists(política, "método", ...), que con hasattr
+revisaba en tiempo de ejecución si la política tenía el método y, si no, no hacía nada.
+Ahora cada política declara dos banderas de clase y Memory llama directo al método
+solo si la bandera correspondiente está prendida:
+  - tracks_cursor:    la política guarda un puntero (Next Fit), así que necesita
+                      reset, after_allocate y on_node_merged.
+  - keeps_hole_index: la política guarda su propio registro de huecos (Quick Fit),
+                      así que necesita reset, on_hole_added y on_hole_removed.
+Si se agrega una política nueva basta con ponerle sus banderas; Memory no cambia.
+"""
 # ---------------------------------------------------------------------------
 # Memoria: arreglo de celdas + lista doblemente ligada de bloques
 # ---------------------------------------------------------------------------
 class Memory:
 
-    def __init__(self, size=MEMORY_SIZE, strategy=None):
+    def __init__(self, size=MEMORY_SIZE, strategy=None): # Por default la estrategia es Nula
         self.size = size
-        self.strategy = strategy if strategy is not None else FirstFit()
+        self.strategy = strategy if strategy is not None else FirstFit() # Si no se especifica estrategia se usa first fit
         self._reset_to_single_hole()
 
     def _reset_to_single_hole(self):
@@ -257,7 +278,8 @@ class Memory:
         self.head = Node(start=0, weight=self.size, is_hole=True)
         self.node_count = 1
         self.busy = {}                 # pid -> nodo
-        self.strategy.reset(self)
+        if self.strategy.tracks_cursor or self.strategy.keeps_hole_index:  # (modificado por Claude) Solo llama a estos métodos si la bandera lo permite
+            self.strategy.reset(self)  # (modificado por Claude)
 
     # --- recorridos -------------------------------------------------------
     def nodes(self):
@@ -267,7 +289,7 @@ class Memory:
             curr = curr.next
 
     def holes(self):
-        return [node for node in self.nodes() if node.is_hole]
+        return [node for node in self.nodes() if node.is_hole]  #Así obtenemos todos los nodos que son hoyos
 
     def used_cells(self):
         return sum(node.weight for node in self.busy.values())
@@ -294,12 +316,14 @@ class Memory:
         """
         need = size + MARKER_CELLS
         remainder = hole.weight - need
-        self.strategy.on_hole_removed(self, hole)
+        if self.strategy.keeps_hole_index:  # (modificado por Claude)
+            self.strategy.on_hole_removed(self, hole)  # (modificado por Claude)
         if remainder > 0:
             rest = Node(start=hole.start + need, weight=remainder, is_hole=True)
             self._link_after(hole, rest)
             hole.weight = need
-            self.strategy.on_hole_added(self, rest)
+            if self.strategy.keeps_hole_index:  # (modificado por Claude)
+                self.strategy.on_hole_added(self, rest)  # (modificado por Claude)
         hole.is_hole = False
         hole.pid = pid
         self.cells[hole.start] = START
@@ -315,7 +339,8 @@ class Memory:
         node = None
         if hole is not None:
             node = self.place(hole, pid, size)
-            self.strategy.after_allocate(self, node)
+            if self.strategy.tracks_cursor:  # (modificado por Claude)
+                self.strategy.after_allocate(self, node)  # (modificado por Claude)
         return node, visited
 
     def free(self, pid):
@@ -327,19 +352,23 @@ class Memory:
         node.pid = None
         survivor = node
         if node.prev is not None and node.prev.is_hole:
-            self.strategy.on_hole_removed(self, node.prev)
+            if self.strategy.keeps_hole_index:  # (modificado por Claude)
+                self.strategy.on_hole_removed(self, node.prev)  # (modificado por Claude)
             survivor = self._merge(node.prev, node)
         if survivor.next is not None and survivor.next.is_hole:
-            self.strategy.on_hole_removed(self, survivor.next)
+            if self.strategy.keeps_hole_index:  # (modificado por Claude)
+                self.strategy.on_hole_removed(self, survivor.next)  # (modificado por Claude)
             survivor = self._merge(survivor, survivor.next)
-        self.strategy.on_hole_added(self, survivor)
+        if self.strategy.keeps_hole_index:  # (modificado por Claude)
+            self.strategy.on_hole_added(self, survivor)  # (modificado por Claude)
         return survivor
 
     def _merge(self, left, right):
         """Fusiona dos huecos contiguos. En el arreglo ya son una sola racha vacía; solo cambia la lista."""
         left.weight += right.weight
         self._unlink(right)
-        self.strategy.on_node_merged(self, right, left)
+        if self.strategy.tracks_cursor:  # (modificado por Claude)
+            self.strategy.on_node_merged(self, right, left)  # (modificado por Claude)
         return left
 
     # --- generación de bloques aleatorios ---------------------------------
@@ -361,10 +390,11 @@ class Memory:
             if placed:
                 self.place(hole, pid, size)
                 pid += 1
-        for victim in list(self.busy):
+        for victim in list(self.busy):  # (Tiempo de vida) algunos procesos iniciales mueren al azar
             if rng.random() < free_probability:
                 self.free(victim)
-        self.strategy.reset(self)
+        if self.strategy.tracks_cursor or self.strategy.keeps_hole_index:  # (modificado por Claude)
+            self.strategy.reset(self)  # (modificado por Claude)
         return pid
 
     def _first_hole_that_fits(self, need):
@@ -432,7 +462,12 @@ class Memory:
         if backwards != self.node_count:
             raise AssertionError("Los enlaces prev no coinciden con los enlaces next")
 
-    # --- visualización -----------------------------------------------------
+
+    # -------------------------------------------------------------------------------
+    #                  Método para visualización de resultados
+    #--------------------------------------------------------------------------------
+
+
     def _cell_char(self, cell):
         if cell == START:
             return paint("[", 90)
@@ -459,8 +494,11 @@ class Memory:
         print(self.render_list())
 
 
+#Este sólo es un metodo para que se vean bonitos los resultados, no afecta el resultado de la tarea
+
 def paint(text, color):
     return f"\033[{color}m{text}\033[0m" if USE_COLORS else text
+
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +572,11 @@ def generate_request_stream(rng, active_pids, next_pid, count):
     active = list(active_pids)
     for _ in range(count):
         if not active or (len(active) < MAX_ACTIVE and rng.random() < ALLOC_PROBABILITY):
-            requests.append(("ALLOC", next_pid, rng.randint(MIN_REQUEST, MAX_REQUEST)))
+            requests.append(("ALLOC", next_pid, rng.randint(MIN_REQUEST, MAX_REQUEST)))  # (Tiempo de vida) aquí nace el proceso
             active.append(next_pid)
             next_pid += 1
         else:
-            pid = rng.choice(active)
+            pid = rng.choice(active)  # (Tiempo de vida) se elige al azar qué proceso vivo muere
             requests.append(("FREE", pid, None))
             active.remove(pid)
     return requests
@@ -577,7 +615,8 @@ def run_strategy(strategy):
                 stats.denied += 1
             else:
                 node = memory.place(hole, pid, size)
-                strategy.after_allocate(memory, node)
+                if strategy.tracks_cursor:  # (modificado por Claude)
+                    strategy.after_allocate(memory, node)  # (modificado por Claude)
             stats.alloc_maintenance += strategy.maintenance_visits - maintenance_before
 
         elif pid in memory.busy:   # si su asignación fue rechazada, no hay nada que liberar
@@ -643,3 +682,4 @@ def run_simulation():
 
 demo()
 run_simulation()
+
